@@ -1,10 +1,8 @@
 import mongoose, { Document, Model, Schema, Types } from 'mongoose';
 
-// Created helper types for Event interface.
 export type EventFormat = 'online' | 'in-person' | 'hybrid';
 export type TicketPriceType = 'free' | 'paid';
 
-// Exporting new interface for Event, so that this can be consumed by other files, in-line with the DRY policy. Interface fields exactly match the initial model no new changes have been made.
 export interface IEvent extends Document<Types.ObjectId> {
   siteId: Types.ObjectId;
   title: string;
@@ -72,7 +70,6 @@ const EventSchema = new Schema<IEvent>(
 EventSchema.index({ siteId: 1, slug: 1 }, { unique: true });
 EventSchema.index({ siteId: 1, status: 1, startAt: 1 });
 
-// Create a model using the interface schema.
 const Event: Model<IEvent> = mongoose.models.Event || mongoose.model<IEvent>('Event', EventSchema);
 
 export default Event;

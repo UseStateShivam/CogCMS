@@ -14,14 +14,12 @@ import {
   type FieldDiffResult,
 } from '@/lib/revisions/diff';
 
-// Author identity metadata embedded in each revision record.
 export interface RevisionAuthor {
   id: string;
   name: string;
   email: string;
 }
 
-// Lightweight revision item for the sidebar list (excludes heavy snapshot payload for network efficiency).
 export interface RevisionSummaryItem {
   _id: string;
   majorVersion: number;
@@ -34,12 +32,10 @@ export interface RevisionSummaryItem {
   createdAt: string;
 }
 
-// Complete revision item retrieved on-demand when a user selects a version to compare.
 export interface RevisionDetailItem extends RevisionSummaryItem {
   snapshot: Record<string, unknown>;
 }
 
-// Component contract for the RevisionDrawer slide-over pane.
 export interface RevisionDrawerProps {
   isOpen: boolean;
   onClose: () => void;
@@ -50,9 +46,6 @@ export interface RevisionDrawerProps {
   authors?: Array<{ _id?: string; id?: string; name: string }>;
 }
 
-// Main Revision Drawer Component:
-// Provides historical version browsing, side-by-side & unified diff viewer, metadata change tracking,
-// and one-click draft restoration with full responsiveness across mobile, tablet, and desktop.
 export function RevisionDrawer({
   isOpen,
   onClose,
@@ -62,41 +55,30 @@ export function RevisionDrawer({
   onRestore,
   authors: initialAuthors,
 }: RevisionDrawerProps) {
-  // Active tenant site and composite request key to prevent cross-item and cross-site history leaks.
+  // Composite key guards against stale responses when switching sites or entities while drawer stays mounted.
   const site = useSite();
   const currentSiteId = site?.id ? String(site.id) : (currentDraft?.siteId ? String(currentDraft.siteId) : '');
   const activeRequestKey = `${currentSiteId}:${entityType}:${entityId || ''}`;
   const activeRequestKeyRef = useRef(activeRequestKey);
   activeRequestKeyRef.current = activeRequestKey;
 
-  // Pagination abort controller ref: guarantees pending loadMore requests are aborted on entity/site switch.
   const loadMoreAbortRef = useRef<AbortController | null>(null);
 
-  // Revisions list and active selection state.
   const [revisions, setRevisions] = useState<RevisionSummaryItem[]>([]);
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [selectedRevisionDetail, setSelectedRevisionDetail] = useState<RevisionDetailItem | null>(null);
 
-  // Pagination states for bounded version list reads.
   const [page, setPage] = useState<number>(1);
   const [hasMore, setHasMore] = useState<boolean>(false);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
 
-  // Network loading and mutation states.
   const [loadingList, setLoadingList] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [restoring, setRestoring] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-
-  // Modal / confirmation states.
   const [confirmRestoreOpen, setConfirmRestoreOpen] = useState(false);
 
-  // View presentation options:
-  // - viewMode: 'split' (side-by-side) vs 'unified' (inline changes).
-  // - onlyChanges: Toggle to hide identical fields and display only modified content.
-  // - collapsedBranches: Per-major-release collapse state (e.g. collapse Release v1.x).
-  // - mobileTab: On mobile screens (<768px), switch between 'versions' list and 'diff' view.
   const [viewMode, setViewMode] = useState<'split' | 'unified'>('split');
   const [onlyChanges, setOnlyChanges] = useState<boolean>(false);
   const [collapsedBranches, setCollapsedBranches] = useState<Record<number, boolean>>({});
@@ -105,7 +87,6 @@ export function RevisionDrawer({
   const [isMaximized, setIsMaximized] = useState<boolean>(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(false);
 
-  // Author lookup map for resolving human-readable names in blog metadata diffs.
   const [authorMap, setAuthorMap] = useState<Record<string, string>>(() => {
     const map: Record<string, string> = {};
     if (Array.isArray(initialAuthors)) {
@@ -164,11 +145,8 @@ export function RevisionDrawer({
     };
   }, [isOpen, entityType, currentSiteId, initialAuthors]);
 
-  // Effect 1: Fetch revisions list whenever the drawer opens for an entity.
-  // Utilizes AbortController to cancel in-flight requests when the drawer closes or entityId changes,
-  // preventing stale or out-of-order responses from contaminating the UI.
+  // Abort in-flight revision list requests if the drawer closes or active entity changes.
   useEffect(() => {
-    // Abort any in-flight loadMore request from previous entity or session
     loadMoreAbortRef.current?.abort();
     loadMoreAbortRef.current = null;
 
@@ -229,8 +207,7 @@ export function RevisionDrawer({
     };
   }, [isOpen, entityType, entityId, activeRequestKey]);
 
-  // Effect 2: Fetch full snapshot payload when selectedRevisionId changes.
-  // Cancels previous snapshot requests using AbortController to avoid displaying outdated comparisons.
+  // Fetch full snapshot payload on demand when selecting a revision.
   useEffect(() => {
     if (!selectedRevisionId) {
       setSelectedRevisionDetail(null);
@@ -273,7 +250,6 @@ export function RevisionDrawer({
     };
   }, [selectedRevisionId]);
 
-  // Restoration handler: Invokes backend restore endpoint and updates live parent editor with canonical restored entity.
   async function handleConfirmRestore() {
     if (!selectedRevisionDetail || selectedRevisionDetail._id !== selectedRevisionId) return;
     setRestoring(true);
@@ -300,8 +276,7 @@ export function RevisionDrawer({
     }
   }
 
-  // Pagination handler: Fetches next page of historical revisions and appends to the list.
-  // Guarded by AbortController and active entity/site request key to prevent cross-item and cross-site history leaks.
+  // Guarded by activeRequestKeyRef so slow responses from a previous site/entity cannot append to a new list.
   async function handleLoadMore() {
     if (loadingMore || !hasMore || !entityId) return;
 
@@ -606,18 +581,15 @@ export function RevisionDrawer({
     };
   }, [selectedRevisionDetail, currentDraft, entityType, authorMap, authorsLoaded]);
 
-  // Toggle collapse state for a release group (e.g. expand/collapse Release v1.x).
   function toggleBranchCollapse(major: number) {
     setCollapsedBranches((prev) => ({ ...prev, [major]: !prev[major] }));
   }
 
-  // Version selection handler: Sets active revision and automatically switches mobile tab to 'diff'.
   function handleSelectRevision(id: string) {
     setSelectedRevisionId(id);
     setMobileTab('diff');
   }
 
-  // Side-by-Side Token Renderer: Highlights removals on left pane (rose) and additions on right pane (emerald).
   function renderSideTokens(tokens: DiffToken[], side: 'left' | 'right') {
     return (
       <div className="leading-relaxed break-words">
@@ -655,7 +627,6 @@ export function RevisionDrawer({
     );
   }
 
-  // Unified Token Renderer: Displays removals (strikethrough) and additions (emerald) in a continuous inline stream.
   function renderUnifiedTokens(tokens: DiffToken[]) {
     return (
       <div className="leading-relaxed break-words">

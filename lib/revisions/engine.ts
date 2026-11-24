@@ -18,11 +18,7 @@ import type { AuthenticatedUser } from '@/lib/auth/require';
 import { normalizeDateToEpoch } from '@/lib/revisions/diff';
 import { assertBlogAuthorIsUsable } from '@/lib/admin/blog-author';
 
-// When an entity (like a blog or event) is updated or restored, three distinct things must happen in the database:
-// The Document itself is modified in the blogs or events collection.
-// A new immutable Revision Snapshot is recorded in the revisions collection.
-// An entry is appended to the audit_logs collection.
-// Without a transaction wrapper, if step 1 and 2 succeed but step 3 throws an error or the server crashes, we would end up with orphaned data, corrupted revision history, or untracked changes. runInTransaction guarantees Atomicity: if any step fails, MongoDB automatically rolls back all preceding writes.
+// Keep entity mutations, revision snapshots, and audit entries atomic.
 export async function runInTransaction<T>(
   fn: (session?: ClientSession) => Promise<T>,
 ): Promise<T> {
@@ -39,7 +35,6 @@ export async function runInTransaction<T>(
   }
 }
 
-// Parameter bundle required to record a revision snapshot.
 export interface CreateRevisionParams {
   siteId: string | Types.ObjectId;
   entityType: RevisionEntityType;
@@ -52,17 +47,13 @@ export interface CreateRevisionParams {
   session?: ClientSession;
 }
 
-// Zero-change deduplication guard.
-// Architectural intent: Prevents the creation of duplicate revision rows when an editor repeatedly clicks 'Save Draft' or 'Publish' without altering content, title, tags, or settings.
 export function hasContentChanged(
   entityType: RevisionEntityType,
   current: Record<string, unknown>,
   previous: Record<string, unknown> | undefined,
 ): boolean {
-  // If there is no previous revision to compare against, content is by definition new.
   if (!previous) return true;
 
-  // Domain-specific fields tracked for change detection.
   const fields =
     entityType === 'blog'
       ? [
@@ -102,12 +93,11 @@ export function hasContentChanged(
           'metaDescription',
         ];
 
-  // Scalar and date field comparison.
   for (const field of fields) {
     const curVal = current[field];
     const prevVal = previous[field];
 
-    // Timestamp normalization: Compare epoch milliseconds to avoid false positives from ISO string variations.
+    // Compare epoch ms so ISO formatting differences do not cause false positives.
     if (field === 'startAt' || field === 'endAt') {
       const tz = String(current.timeZone || previous.timeZone || 'UTC');
       const curTime = normalizeDateToEpoch(curVal, tz);
@@ -116,7 +106,6 @@ export function hasContentChanged(
       continue;
     }
 
-    // String normalization: Handle null/undefined equivalence and trim whitespace.
     const curStr = curVal === undefined || curVal === null ? '' : String(curVal).trim();
     const prevStr = prevVal === undefined || prevVal === null ? '' : String(prevVal).trim();
 
@@ -125,7 +114,6 @@ export function hasContentChanged(
     }
   }
 
-  // Complex structured field comparison for blogs (arrays of tags, key takeaways, embedded FAQs, related posts, and author).
   if (entityType === 'blog') {
     const curAuthor = current.authorId ? String(current.authorId) : '';
     const prevAuthor = previous.authorId ? String(previous.authorId) : '';
@@ -135,6 +123,7 @@ export function hasContentChanged(
     const prevRelated = JSON.stringify(previous.relatedSlugs ?? []);
     if (curRelated !== prevRelated) return true;
 
+    // Strip Mongoose subdocument _id fields before comparing so empty edits stay deduplicated.
     const normalizeToc = (toc: unknown) => {
       if (!Array.isArray(toc)) return [];
       return toc.map((t: any) => ({
@@ -167,13 +156,10 @@ export function hasContentChanged(
     if (curFaqs !== prevFaqs) return true;
   }
 
-  // All tracked fields matched exactly; suppress duplicate snapshot creation.
   return false;
 }
 
-// Explicit snapshot allowlist sanitizer.
-// Enforces bounded storage by omitting recomputable runtime data (e.g. rendered HTML)
-// and database internals (_id, siteId, __v, timestamps) before persistence in immutable revisions.
+// Omit recomputable HTML (rendered) and DB internals (_id, siteId, __v, timestamps) from stored snapshots.
 export function sanitizeRevisionSnapshot(
   entityType: RevisionEntityType,
   raw: Record<string, unknown>,
@@ -265,9 +251,7 @@ export async function createRevisionSnapshot(params: CreateRevisionParams): Prom
     .sort({ createdAt: -1, _id: -1 })
     .exec();
 
-  // Case 1: No previous revisions exist (initial entity creation, or user deleted all previous revisions).
-  // If the document is currently published, the initial baseline revision MUST have trigger 'publish' (badge: Published),
-  // rather than a false 'Draft' badge.
+  // No previous revisions: published items start as 'publish' (v1.0) rather than a misleading 'create' badge.
   if (!latestCreated) {
     const initialTrigger: RevisionTrigger = isPublishedSnapshot || trigger === 'publish' ? 'publish' : 'create';
     const version = '1.0';
@@ -524,10 +508,7 @@ export async function createRevisionSnapshot(params: CreateRevisionParams): Prom
   return Revision.create(finalDoc);
 }
 
-// Draft Restoration Engine.
-// Restores historical content AS A DRAFT without publishing it as a side effect.
-// Records a new release milestone v(N+1).0 with restoration lineage, logs an audit trail event,
-// and ensures consistent transactional write.
+// Restores a historical revision as an unpublished draft (clearing publishedAt) inside a transaction.
 export async function restoreRevision(
   revisionId: string,
   siteId: string,

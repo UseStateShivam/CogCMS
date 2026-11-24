@@ -3,20 +3,13 @@ import type { GraphicConfig } from '@/lib/blog-content/graphics/types';
 import { sanitizeBlogHtml } from '@/lib/sanitize-blog-html';
 import { renderGraphic } from '@/lib/blog-content/graphics/render';
 
-// Token classification for text comparison:
-// - 'added': Substring present in the newer revision but absent from the older baseline (rendered in emerald).
-// - 'removed': Substring present in the older baseline but deleted in the newer revision (rendered in rose / line-through).
-// - 'unchanged': Substring identical across both versions (rendered with normal neutral typography).
 export type DiffTokenType = 'added' | 'removed' | 'unchanged';
 
-// Atomic unit of a diff sequence associating a continuous string slice with its change status.
 export interface DiffToken {
   type: DiffTokenType;
   text: string;
 }
 
-// Structured comparison outcome for an individual content model property (e.g., title, excerpt, metadata).
-// Carries change flag, stringified values, token array for highlighting, and word-level addition/deletion counts.
 export interface FieldDiffResult {
   isChanged: boolean;
   oldValue: string;
@@ -26,30 +19,23 @@ export interface FieldDiffResult {
   deletions: number;
 }
 
-// Splits continuous prose into alternating sequences of non-whitespace words (\S+) and whitespace characters (\s+).
-// Why: Standard String.prototype.split(' ') strips trailing spaces, indentation, and newlines.
-// Matching /\S+|\s+/g preserves all layout formatting and spaces so tokens can be reassembled with zero character loss.
+// Preserve spaces and newlines so tokens reassemble without losing layout formatting.
 export function tokenizeWords(text: string): string[] {
   if (!text) return [];
   return text.match(/\S+|\s+/g) || [];
 }
 
-// Line-level Longest Common Subsequence (LCS) diff algorithm.
-// Serves as an O(N*M) fallback for large multi-thousand-word documents when word-level matrix computation
-// would exceed memory/performance budgets.
+// Line-level LCS fallback when word-level matrix size exceeds the circuit breaker budget.
 export function computeLineDiff(oldText: string, newText: string): DiffToken[] {
-  // Normalize empty or undefined inputs and decompose text into newline-delimited rows.
   const linesOld = (oldText || '').split('\n');
   const linesNew = (newText || '').split('\n');
   const n = linesOld.length;
   const m = linesNew.length;
 
-  // Short-circuit: When both inputs are strictly identical, return a single unchanged token in O(1) time.
   if (oldText === newText) {
     return oldText ? [{ type: 'unchanged', text: oldText }] : [];
   }
 
-  // DP Matrix initialization: dp[i][j] stores the length of the longest common line subsequence between linesOld[0..i-1] and linesNew[0..j-1].
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
@@ -61,42 +47,32 @@ export function computeLineDiff(oldText: string, newText: string): DiffToken[] {
     }
   }
 
-  // Backtracking path traversal: Walk backwards from bottom-right (n, m) to top-left (0, 0)
-  // to construct the edit script of additions, deletions, and unchanged line blocks.
   const result: DiffToken[] = [];
   let i = n;
   let j = m;
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && linesOld[i - 1] === linesNew[j - 1]) {
-      // Diagonal step: Line exists in both versions unchanged.
       result.unshift({ type: 'unchanged', text: linesOld[i - 1] + (i < n ? '\n' : '') });
       i--;
       j--;
     } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      // Horizontal step: Line was added in the newer version.
       result.unshift({ type: 'added', text: linesNew[j - 1] + (j < m ? '\n' : '') });
       j--;
     } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
-      // Vertical step: Line was removed from the older version.
       result.unshift({ type: 'removed', text: linesOld[i - 1] + (i < n ? '\n' : '') });
       i--;
     }
   }
 
-  // Merge contiguous tokens of identical status to minimize DOM nodes in the UI.
   return mergeDiffTokens(result);
 }
 
-// Word-level Longest Common Subsequence (LCS) diff algorithm.
-// Produces granular word-by-word highlights for titles, excerpts, descriptions, and body paragraphs.
 export function computeWordDiff(oldText: string, newText: string): DiffToken[] {
-  // Convert text into word and whitespace tokens.
   const a = tokenizeWords(oldText || '');
   const b = tokenizeWords(newText || '');
   const n = a.length;
   const m = b.length;
 
-  // Trivial edge cases: identical content, blank source, or blank destination.
   if (oldText === newText) {
     return oldText ? [{ type: 'unchanged', text: oldText }] : [];
   }
@@ -107,13 +83,11 @@ export function computeWordDiff(oldText: string, newText: string): DiffToken[] {
     return n > 0 ? [{ type: 'removed', text: oldText }] : [];
   }
 
-  // Circuit breaker: If token product exceeds 200,000 operations (e.g. comparing two 10,000-word articles),
-  // drop to line-level diffing to prevent browser thread freeze and heap exhaustion.
+  // Drop to line-level diffing on huge articles so O(N*M) allocation does not stall the UI thread.
   if (n * m > 200000) {
     return computeLineDiff(oldText, newText);
   }
 
-  // DP Matrix: Allocates (n + 1) x (m + 1) table tracking longest common token sub-sequence.
   const dp: number[][] = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
   for (let i = 1; i <= n; i++) {
     for (let j = 1; j <= m; j++) {
@@ -125,34 +99,27 @@ export function computeWordDiff(oldText: string, newText: string): DiffToken[] {
     }
   }
 
-  // Backtracking path reconstruction: Step backwards from (n, m) to (0, 0).
   const result: DiffToken[] = [];
   let i = n;
   let j = m;
   while (i > 0 || j > 0) {
     if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) {
-      // Matching word: Unchanged.
       result.unshift({ type: 'unchanged', text: a[i - 1] });
       i--;
       j--;
     } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
-      // Word present in new revision only: Added.
       result.unshift({ type: 'added', text: b[j - 1] });
       j--;
     } else if (i > 0 && (j === 0 || dp[i][j - 1] < dp[i - 1][j])) {
-      // Word present in old revision only: Removed.
       result.unshift({ type: 'removed', text: a[i - 1] });
       i--;
     }
   }
 
-  // Consolidate adjacent tokens of identical type into unified string blocks.
   return mergeDiffTokens(result);
 }
 
-// Token compaction: Combines consecutive tokens of identical DiffTokenType.
-// Why: Backtracking outputs one token per word/space. Rendering 1,000 individual <span> elements
-// bloats the React virtual DOM; merging adjacent tokens collapses them to a fraction of DOM nodes.
+// Merge adjacent same-status tokens to cut React DOM node count.
 export function mergeDiffTokens(tokens: DiffToken[]): DiffToken[] {
   const merged: DiffToken[] = [];
   for (const token of tokens) {
@@ -165,18 +132,12 @@ export function mergeDiffTokens(tokens: DiffToken[]): DiffToken[] {
   return merged;
 }
 
-// HTML Tag Stripper: Normalizes rich text HTML (e.g. Quill/DOM markup) into clean plain text prose.
-// Why: Comparing raw HTML strings introduces noise from opening/closing tags (<p>, <strong>, etc.).
-// Stripping tags allows editors to evaluate editorial wording changes rather than markup differences.
 export function stripHtmlTags(input: string): string {
   if (!input) return '';
   return input.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-// Balanced HTML Parser for embedded Quill blog graphic widgets.
-// Recursively tracks nested <div> depth so that the entire outer container (including all inner
-// stat cards, comparison columns, and callout boxes) is cleanly replaced without leaving
-// orphaned inner tags that cause duplicate ghost card rendering in the preview.
+// Track nested <div> depth so embedded graphic widgets replace cleanly without orphaned inner tags.
 export function replaceBlogGraphics(
   html: string,
   replacer: (config: GraphicConfig, fullMatch: string) => string,
@@ -264,17 +225,12 @@ export function replaceBlogGraphics(
   return result;
 }
 
-// Visual Body HTML Hydrator:
-// Sanitizes incoming historical or draft HTML at the presentation boundary before injection,
-// and replaces embedded graphic configs into visual components using balanced HTML div parsing.
-// Neutralizes hostile markup (e.g. script injection, onerror handlers, dangerous protocols) at rendering boundary.
+// Re-sanitize HTML at render boundary before converting embedded graphic configs for Visual Canvas preview.
 export function renderVisualBodyHtml(rawHtml: string): string {
   if (!rawHtml || !rawHtml.trim()) {
     return '<p class="text-stone-400 italic">No content</p>';
   }
 
-  // Defensive sanitization: Neutralizes malicious tags, inline event listeners, and dangerous protocols
-  // even if legacy or third-party database records bypassed previous write filters.
   const cleanHtml = sanitizeBlogHtml(rawHtml);
 
   return replaceBlogGraphics(cleanHtml, (config) => {
@@ -282,10 +238,7 @@ export function renderVisualBodyHtml(rawHtml: string): string {
   });
 }
 
-// Structured HTML to Text Converter.
-// Unlike naive tag stripping which squashes all text into a single line, this converter
-// preserves paragraph breaks, table columns and rows, and provides human-readable summaries
-// for embedded graphic cards (stat cards, callouts, comparisons).
+// Preserve paragraph/table structure and represent graphics and media embeds as readable tokens for diffing.
 export function htmlToStructuredText(input: string): string {
   if (!input) return '';
 
@@ -366,10 +319,7 @@ export function htmlToStructuredText(input: string): string {
   return text.trim();
 }
 
-// High-level diff adapter for any document property.
-// Accepts raw values, handles null/undefined coercion, runs word diffing, and calculates addition/deletion stats.
 export function computeFieldDiff(oldVal: unknown, newVal: unknown): FieldDiffResult {
-  // Coerce undefined or null values into empty strings.
   const oldStr = oldVal === undefined || oldVal === null ? '' : String(oldVal);
   const newStr = newVal === undefined || newVal === null ? '' : String(newVal);
 
@@ -379,8 +329,7 @@ export function computeFieldDiff(oldVal: unknown, newVal: unknown): FieldDiffRes
   let additions = 0;
   let deletions = 0;
 
-  // Calculate actual word metrics rather than internal whitespace tokens for human-friendly stats (+3 added / -1 removed).
-  // Matching \S+ ensures we count real words and ignore whitespace tokens, giving accurate metrics on UI chips.
+  // Count non-whitespace word tokens (\S+) so UI diff badges reflect edited words rather than spaces.
   for (const token of tokens) {
     const wordCount = (token.text.match(/\S+/g) || []).length;
     if (token.type === 'added') {
@@ -400,8 +349,6 @@ export function computeFieldDiff(oldVal: unknown, newVal: unknown): FieldDiffRes
   };
 }
 
-// Helper to parse any representation (ISO string, Date object, local YYYY-MM-DDTHH:mm string)
-// into true epoch milliseconds with time-zone resolution.
 export function normalizeDateToEpoch(val: unknown, timeZone?: string): number {
   if (!val) return 0;
   const str = String(val).trim();
@@ -444,9 +391,7 @@ export function normalizeDateToEpoch(val: unknown, timeZone?: string): number {
   return Number.isFinite(fallback) ? fallback : 0;
 }
 
-// Date/time difference calculator with time-zone normalization.
-// Resolves disparities between UTC database timestamps (e.g. '2026-11-30T03:30:00.000Z')
-// and editor local form datetime values (e.g. '2026-11-30T09:00' in Asia/Kolkata).
+// Normalize DB UTC instants and editor local datetime strings into the same display timezone before diffing.
 export function computeDateTimeDiff(
   oldVal: unknown,
   newVal: unknown,

@@ -149,6 +149,18 @@ describe('sanitizeBlogHtml', () => {
       expect(normalizeVideoEmbedUrl('https://player.vimeo.com/video/76979871?h=abcdef1234')).toBe(
         'https://player.vimeo.com/video/76979871?h=abcdef1234',
       );
+      expect(normalizeVideoEmbedUrl('vimeo.com/76979871?h=abcdef1234#t=30s')).toBe(
+        'https://player.vimeo.com/video/76979871?h=abcdef1234',
+      );
+    });
+
+    it('drops malformed or non-alphanumeric Vimeo privacy hashes safely', () => {
+      expect(normalizeVideoEmbedUrl('https://vimeo.com/76979871?h=bad<script>')).toBe(
+        'https://player.vimeo.com/video/76979871',
+      );
+      expect(normalizeVideoEmbedUrl('https://vimeo.com/76979871?h=%E0%A4%A')).toBe(
+        'https://player.vimeo.com/video/76979871',
+      );
     });
 
     it('returns null for unsupported video providers or arbitrary links', () => {

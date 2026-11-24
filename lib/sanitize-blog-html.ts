@@ -135,12 +135,11 @@ export function normalizeVideoEmbedUrl(url: string): string | null {
     const id = vimeoMatch[1];
     let hash: string | undefined = vimeoMatch[2];
     if (!hash) {
-      try {
-        const parsedUrl = new URL(trimmed);
-        const queryHash = parsedUrl.searchParams.get('h');
-        if (queryHash) hash = queryHash;
-      } catch {
-        /* Ignore malformed URL query strings */
+      // Parse the query substring directly so protocol-less URLs work without swallowing URL parser errors.
+      const queryPart = trimmed.split('?')[1]?.split('#')[0];
+      const queryHash = queryPart ? new URLSearchParams(queryPart).get('h') : null;
+      if (queryHash && /^[a-zA-Z0-9]+$/.test(queryHash)) {
+        hash = queryHash;
       }
     }
     return hash ? `https://player.vimeo.com/video/${id}?h=${hash}` : `https://player.vimeo.com/video/${id}`;

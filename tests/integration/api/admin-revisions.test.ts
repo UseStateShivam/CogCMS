@@ -3,6 +3,10 @@ import { Types } from 'mongoose';
 import { GET as getRevisionsList } from '@/app/api/admin/revisions/route';
 import { GET as getRevisionDetail } from '@/app/api/admin/revisions/[id]/route';
 import { POST as restoreRevisionRoute } from '@/app/api/admin/revisions/[id]/restore/route';
+import { POST as createBlog } from '@/app/api/admin/blogs/route';
+import { PUT as updateBlog } from '@/app/api/admin/blogs/[slug]/route';
+import { POST as createEvent } from '@/app/api/admin/events/route';
+import { PUT as updateEvent } from '@/app/api/admin/events/[slug]/route';
 import Revision from '@/models/Revision';
 import Blog from '@/models/Blog';
 import Event from '@/models/Event';
@@ -985,6 +989,15 @@ describe('Admin Revisions API', () => {
       const body = await res.json();
       expect(body.code).toBe('VALIDATION_ERROR');
     }
+
+    // Reject invalid trigger enum values with 400
+    const badTriggerReq = await authenticatedRequest(
+      `http://localhost:3003/api/admin/revisions?entityType=blog&entityId=${blog._id}&trigger=invalid_trigger`,
+      { user: admin, siteId: site._id.toString() },
+    );
+    const badTriggerRes = await getRevisionsList(badTriggerReq, { params: Promise.resolve({}) });
+    expect(badTriggerRes.status).toBe(400);
+    expect((await badTriggerRes.json()).code).toBe('VALIDATION_ERROR');
   });
 
   it('preserves Event speakers as a string and ticketPriceAmount without numeric formatting loss across revision snapshot and restore', async () => {
@@ -1276,5 +1289,241 @@ describe('Admin Revisions API', () => {
     expect(restoredRev3Blog?.content).toContain('photo2.webp');
     expect(restoredRev3Blog?.content).toContain('src="https://player.vimeo.com/video/76979871"');
     expect(restoredRev3Blog?.content).toContain('allowfullscreen');
+  });
+
+  it('wires real blog create, update, deduplication, publish, unpublish, and restore routes end-to-end', async () => {
+    const site = await createTestSite();
+    const editor = await createTestUser({ role: 'editor', siteIds: [site._id.toString()] });
+    const rootCtx = { params: Promise.resolve({}) };
+    const slugCtx = { params: Promise.resolve({ slug: 'real-route-blog' }) };
+
+    const createRes = await createBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'POST',
+        json: {
+          title: 'Real Route Blog',
+          slug: 'real-route-blog',
+          content: '<p>Initial draft body</p>',
+          status: 'draft',
+        },
+      }),
+      rootCtx,
+    );
+    expect(createRes.status).toBe(201);
+    const createdBlog = await createRes.json();
+
+    // Editing content + FAQs should create v1.1.
+    const updateRes = await updateBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs/real-route-blog', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: {
+          content: '<p>Updated draft body</p>',
+          faqs: [{ question: 'Why revisions?', answer: 'Safe rollback.' }],
+        },
+      }),
+      slugCtx,
+    );
+    expect(updateRes.status).toBe(200);
+
+    // Repeating an identical FAQ payload (without changing content) must deduplicate at v1.1.
+    const dupUpdateRes = await updateBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs/real-route-blog', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: {
+          content: '<p>Updated draft body</p>',
+          faqs: [{ question: 'Why revisions?', answer: 'Safe rollback.' }],
+        },
+      }),
+      slugCtx,
+    );
+    expect(dupUpdateRes.status).toBe(200);
+
+    const publishRes = await updateBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs/real-route-blog', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: { status: 'publish' },
+      }),
+      slugCtx,
+    );
+    expect(publishRes.status).toBe(200);
+
+    const unpublishRes = await updateBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs/real-route-blog', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: { status: 'draft' },
+      }),
+      slugCtx,
+    );
+    expect(unpublishRes.status).toBe(200);
+
+    const listRes = await getRevisionsList(
+      await authenticatedRequest(
+        `http://localhost:3003/api/admin/revisions?entityType=blog&entityId=${createdBlog._id}`,
+        { user: editor, siteId: site._id.toString() },
+      ),
+      rootCtx,
+    );
+    expect(listRes.status).toBe(200);
+    const listed = await listRes.json();
+    expect(listed.map((r: { version: string }) => r.version)).toEqual(['2.1', '2.0', '1.1', '1.0']);
+    expect(listed.map((r: { trigger: string }) => r.trigger)).toEqual([
+      'unpublish',
+      'publish',
+      'update',
+      'create',
+    ]);
+
+    const v1 = listed.find((r: { version: string }) => r.version === '1.0');
+    const restoreRes = await restoreRevisionRoute(
+      await authenticatedRequest(`http://localhost:3003/api/admin/revisions/${v1._id}/restore`, {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'POST',
+      }),
+      { params: Promise.resolve({ id: v1._id }) },
+    );
+    expect(restoreRes.status).toBe(200);
+    const restored = await restoreRes.json();
+    expect(restored.restoredRevision.version).toBe('3.0');
+    expect(restored.restoredRevision.trigger).toBe('restore');
+    expect(restored.entity.status).toBe('draft');
+    expect(restored.entity.publishedAt).toBeUndefined();
+    expect(restored.entity.content).toBe('<p>Initial draft body</p>');
+
+    // Republishing immediately after restore promotes v3.0 in-place to trigger: 'publish'.
+    const republishRes = await updateBlog(
+      await authenticatedRequest('http://localhost:3003/api/admin/blogs/real-route-blog', {
+        user: editor,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: { status: 'publish' },
+      }),
+      slugCtx,
+    );
+    expect(republishRes.status).toBe(200);
+
+    const latestRev = await Revision.findById(restored.restoredRevision._id).exec();
+    expect(latestRev?.version).toBe('3.0');
+    expect(latestRev?.trigger).toBe('publish');
+
+    const auditLogs = await AuditLog.find({ siteId: site._id, entityType: 'blog' })
+      .sort({ createdAt: 1, _id: 1 })
+      .exec();
+    expect(auditLogs.map((a) => a.action)).toEqual([
+      'create',
+      'update',
+      'update',
+      'publish',
+      'unpublish',
+      'restore',
+      'publish',
+    ]);
+  });
+
+  it('wires real event create, publish, deduplication, and restore routes end-to-end', async () => {
+    const site = await createTestSite();
+    const admin = await createTestUser({ role: 'admin', siteIds: [site._id.toString()] });
+    const rootCtx = { params: Promise.resolve({}) };
+    const slugCtx = { params: Promise.resolve({ slug: 'real-route-event' }) };
+
+    const basePayload = {
+      title: 'Real Route Event',
+      slug: 'real-route-event',
+      summary: 'Initial summary',
+      content: '<p>Event description</p>',
+      startAt: '2026-12-10T09:00:00.000Z',
+      endAt: '2026-12-10T17:00:00.000Z',
+      timeZone: 'UTC',
+      format: 'hybrid',
+      location: 'Hall A',
+      onlineUrl: 'https://stream.example.com/event',
+      ticketPriceType: 'paid',
+      ticketPriceAmount: '49.99',
+      ticketPriceCurrency: 'USD',
+      speakers: 'Ada Lovelace',
+    };
+
+    const createRes = await createEvent(
+      await authenticatedRequest('http://localhost:3003/api/admin/events', {
+        user: admin,
+        siteId: site._id.toString(),
+        method: 'POST',
+        json: { ...basePayload, status: 'draft' },
+      }),
+      rootCtx,
+    );
+    expect(createRes.status).toBe(201);
+    const createdEvent = await createRes.json();
+
+    const publishRes = await updateEvent(
+      await authenticatedRequest('http://localhost:3003/api/admin/events/real-route-event', {
+        user: admin,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: { ...basePayload, summary: 'Published summary', status: 'publish' },
+      }),
+      slugCtx,
+    );
+    expect(publishRes.status).toBe(200);
+
+    // Repeating the same published payload must not create a phantom revision.
+    const dupPublishRes = await updateEvent(
+      await authenticatedRequest('http://localhost:3003/api/admin/events/real-route-event', {
+        user: admin,
+        siteId: site._id.toString(),
+        method: 'PUT',
+        json: { ...basePayload, summary: 'Published summary', status: 'publish' },
+      }),
+      slugCtx,
+    );
+    expect(dupPublishRes.status).toBe(200);
+
+    const revisions = await Revision.find({
+      siteId: site._id,
+      entityType: 'event',
+      entityId: createdEvent._id,
+    })
+      .sort({ majorVersion: -1, minorVersion: -1 })
+      .exec();
+    expect(revisions.map((r) => r.version)).toEqual(['2.0', '1.0']);
+
+    const v1 = revisions.find((r) => r.version === '1.0')!;
+    const restoreRes = await restoreRevisionRoute(
+      await authenticatedRequest(`http://localhost:3003/api/admin/revisions/${v1._id}/restore`, {
+        user: admin,
+        siteId: site._id.toString(),
+        method: 'POST',
+      }),
+      { params: Promise.resolve({ id: v1._id.toString() }) },
+    );
+    expect(restoreRes.status).toBe(200);
+
+    const restoredEvent = await Event.findById(createdEvent._id).exec();
+    expect(restoredEvent?.status).toBe('draft');
+    expect(restoredEvent?.summary).toBe('Initial summary');
+    expect(restoredEvent?.publishedAt).toBeNull();
+
+    const afterRestoreRevs = await Revision.find({
+      siteId: site._id,
+      entityType: 'event',
+      entityId: createdEvent._id,
+    })
+      .sort({ majorVersion: -1, minorVersion: -1 })
+      .exec();
+    expect(afterRestoreRevs.map((r) => `${r.version}:${r.trigger}`)).toEqual([
+      '3.0:restore',
+      '2.0:publish',
+      '1.0:create',
+    ]);
   });
 });
