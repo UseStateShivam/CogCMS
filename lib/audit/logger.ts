@@ -14,13 +14,14 @@ export interface LogAuditParams {
   entityTitle: string;
   action: AuditAction;
   details?: Record<string, unknown>;
+  session?: any;
 }
 
 export async function logAudit(params: LogAuditParams): Promise<void> {
   try {
     await connectToDatabase();
 
-    await AuditLog.create({
+    const doc = {
       siteId: params.siteId
         ? typeof params.siteId === 'string'
           ? new Types.ObjectId(params.siteId)
@@ -37,9 +38,18 @@ export async function logAudit(params: LogAuditParams): Promise<void> {
       entityTitle: params.entityTitle,
       action: params.action,
       details: params.details ?? {},
-    });
+    };
+
+    if (params.session) {
+      await AuditLog.create([doc], { session: params.session });
+    } else {
+      await AuditLog.create(doc);
+    }
   } catch (error) {
-    // Audit logging is best-effort so write failures do not roll back primary mutations.
+    // Fail closed inside transactions to preserve atomicity; otherwise log without blocking mutations.
     console.error('Failed to write audit log:', error);
+    if (params.session) {
+      throw error;
+    }
   }
 }
