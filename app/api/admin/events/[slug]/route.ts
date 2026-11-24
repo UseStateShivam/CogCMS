@@ -33,7 +33,6 @@ export const PUT = withAdmin<Params>(async (req, { site, user, params }) => {
   const type = deliveryEventType(before, event.status);
   if (type)
     notifySiteWebhook(site.id, { type, contentType: 'event', slug: event.slug, id: event.id });
-  // Audit log: record update and publication status transitions with actor context
   await logAudit({
     siteId: site.id,
     actor: user,
@@ -65,7 +64,6 @@ export const DELETE = withAdmin<Params>(async (_req, { site, user, params }) => 
       slug: event.slug,
       id: event.id,
     });
-  // Audit log: record deletion event before responding to caller
   await logAudit({
     siteId: site.id,
     actor: user,

@@ -48,9 +48,8 @@ export const PUT = withAdmin<{ siteId: string }>(
       slug: site.slug,
       id: site._id.toString(),
     });
-    // Audit log: record site settings and domain updates
     await logAudit({
-      siteId: site._id,
+      siteId: null,
       actor: user,
       entityType: 'site',
       entityId: site._id.toString(),

@@ -38,7 +38,6 @@ export const POST = withAdmin<{ siteId: string }>(
     await connectToDatabase();
     if (!(await Site.exists({ _id: siteId }))) throw notFound('Site');
     const issued = await issueApiKey({ siteId, createdBy: user.id, ...parsed.data });
-    // Audit log: record API key generation with assigned scopes
     await logAudit({
       siteId,
       actor: user,

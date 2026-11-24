@@ -34,20 +34,19 @@ export const POST = withAdmin(
       createdBy: user.id,
     });
     
-    const primarySiteId = created.siteIds[0] || user.siteIds[0];
-    
-    // Audit log: record creation event with actor context and tenant site boundary
-    if (primarySiteId) {
-      await logAudit({
-        siteId: primarySiteId,
-        actor: user,
-        entityType: 'user',
-        entityId: created._id.toString(),
-        entityTitle: created.name || created.email,
-        action: 'create',
-        details: { email: created.email, role: created.role },
-      });
-    }
+    await logAudit({
+      siteId: null,
+      actor: user,
+      entityType: 'user',
+      entityId: created._id.toString(),
+      entityTitle: created.name || created.email,
+      action: 'create',
+      details: {
+        email: created.email,
+        role: created.role,
+        siteIds: created.siteIds.map(String),
+      },
+    });
     return NextResponse.json(serializeUser(created), { status: 201 });
   },
   { admin: true, site: false },

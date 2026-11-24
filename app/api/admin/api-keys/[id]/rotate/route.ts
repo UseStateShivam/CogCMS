@@ -9,7 +9,6 @@ export const POST = withAdmin<{ id: string }>(
   async (_req, { params, user }) => {
     const { id } = await params;
     const replacement = await rotateApiKey(id, user.id);
-    // Audit log: record API key rotation and link to replaced key
     await logAudit({
       siteId: replacement.key.siteId,
       actor: user,

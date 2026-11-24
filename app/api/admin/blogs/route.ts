@@ -55,7 +55,6 @@ export const POST = withAdmin(async (req, { user, site }) => {
     });
   }
 
-  // Audit log: record creation event with actor context and tenant site boundary
   await logAudit({
     siteId: site.id,
     actor: user,

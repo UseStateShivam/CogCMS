@@ -10,7 +10,6 @@ export const DELETE = withAdmin<{ id: string }>(
     const { id } = await params;
     const key = await revokeApiKey(id);
 
-    // Audit log: record API key revocation
     await logAudit({
       siteId: key.siteId,
       actor: user,

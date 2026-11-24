@@ -50,28 +50,30 @@ export const PUT = withAdmin<{ userId: string }>(
       status: parsed.data.status ?? target.status,
     });
 
+    const previousRole = target.role;
+    const previousStatus = target.status;
+    const previousSiteIds = target.siteIds.map(String);
+
     const { password, ...updates } = parsed.data;
     target.set(updates);
     if (password) target.passwordHash = await hashPassword(password);
     await target.save();
 
-    const auditSiteId = target.siteIds[0] || user.siteIds[0];
-    if (auditSiteId) {
-      // Audit log: record user account, role, and status modifications
-      await logAudit({
-        siteId: auditSiteId,
-        actor: user,
-        entityType: 'user',
-        entityId: target._id.toString(),
-        entityTitle: target.name || target.email,
-        action: 'update',
-        details: {
-          email: target.email,
-          role: target.role,
-          status: target.status,
-        },
-      });
-    }
+    await logAudit({
+      siteId: null,
+      actor: user,
+      entityType: 'user',
+      entityId: target._id.toString(),
+      entityTitle: target.name || target.email,
+      action: 'update',
+      details: {
+        email: target.email,
+        role: { previous: previousRole, next: target.role },
+        status: { previous: previousStatus, next: target.status },
+        siteIds: { previous: previousSiteIds, next: target.siteIds.map(String) },
+        passwordChanged: Boolean(password),
+      },
+    });
 
     return NextResponse.json(serializeUser(target));
   },

@@ -37,9 +37,8 @@ export const POST = withAdmin(
       webhookUrl: input.webhookUrl ?? undefined,
     });
 
-    // Audit log: record creation event with actor context and tenant site boundary
     await logAudit({
-      siteId: site._id,
+      siteId: null,
       actor: user,
       entityType: 'site',
       entityId: site._id.toString(),

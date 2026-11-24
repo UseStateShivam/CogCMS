@@ -65,7 +65,6 @@ export const PUT = withAdmin<Params>(async (req, { params, user, site }) => {
       id: blog._id.toString(),
     });
   }
-  // Audit log: record update and publication status transitions with actor context
   await logAudit({
     siteId: site.id,
     actor: user,
@@ -101,7 +100,6 @@ export const DELETE = withAdmin<Params>(async (_req, { params, user, site }) => 
       id: blog._id.toString(),
     });
   }
-  // Audit log: record deletion event before responding to caller
   await logAudit({
     siteId: site.id,
     actor: user,
